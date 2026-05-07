@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.Text;
-using System.Text.RegularExpressions;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
@@ -13,7 +12,6 @@ public partial class Form1 : Form
 
     private readonly ListBox filesList = new();
     private readonly TextBox prefixInput = new();
-    private readonly TextBox partMarkerInput = new();
     private readonly TextBox destinationInput = new();
     private readonly ProgressBar progressBar = new();
     private readonly Label statusLabel = new();
@@ -118,10 +116,9 @@ public partial class Form1 : Form
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
+            ColumnCount = 2,
             RowCount = 4,
         };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 240));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 240));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
@@ -131,15 +128,10 @@ public partial class Form1 : Form
         group.Controls.Add(layout);
 
         layout.Controls.Add(new Label { Text = "Texto antes del número", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
-        layout.Controls.Add(new Label { Text = "Nomenclatura serie", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 1, 0);
 
         prefixInput.Dock = DockStyle.Fill;
         prefixInput.PlaceholderText = "Ej.: Página";
         layout.Controls.Add(prefixInput, 0, 1);
-
-        partMarkerInput.Text = "_part";
-        partMarkerInput.Dock = DockStyle.Fill;
-        layout.Controls.Add(partMarkerInput, 1, 1);
 
         layout.Controls.Add(new Label { Text = "Ruta destino", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft }, 0, 2);
 
@@ -157,7 +149,7 @@ public partial class Form1 : Form
         browseDestinationButton.Dock = DockStyle.Fill;
         destinationPanel.Controls.Add(destinationInput, 0, 0);
         destinationPanel.Controls.Add(browseDestinationButton, 1, 0);
-        layout.SetColumnSpan(destinationPanel, 3);
+        layout.SetColumnSpan(destinationPanel, 2);
         layout.Controls.Add(destinationPanel, 0, 3);
 
         return group;
@@ -220,7 +212,6 @@ public partial class Form1 : Form
         filesList.DragDrop += OnPdfDragDrop;
 
         prefixInput.TextChanged += (_, _) => lastPlan = null;
-        partMarkerInput.TextChanged += (_, _) => lastPlan = null;
         destinationInput.TextChanged += (_, _) => lastPlan = null;
     }
 
@@ -391,7 +382,7 @@ public partial class Form1 : Form
 
     private bool TryReadSettings(out NumberingSettings settings)
     {
-        settings = new NumberingSettings([], string.Empty, string.Empty, string.Empty);
+        settings = new NumberingSettings([], string.Empty, string.Empty);
 
         var files = filesList.Items.Cast<string>().ToArray();
         if (files.Length == 0)
@@ -414,13 +405,6 @@ public partial class Form1 : Form
             return false;
         }
 
-        var partMarker = partMarkerInput.Text.Trim();
-        if (string.IsNullOrWhiteSpace(partMarker))
-        {
-            ShowValidation("Debes indicar la nomenclatura de serie. Por defecto: _part.");
-            return false;
-        }
-
         try
         {
             _ = Path.GetFullPath(destination);
@@ -431,7 +415,7 @@ public partial class Form1 : Form
             return false;
         }
 
-        settings = new NumberingSettings(files, destination, prefixInput.Text.Trim(), partMarker);
+        settings = new NumberingSettings(files, destination, prefixInput.Text.Trim());
         return true;
     }
 
@@ -439,7 +423,6 @@ public partial class Form1 : Form
     {
         return string.Equals(left.DestinationFolder, right.DestinationFolder, StringComparison.OrdinalIgnoreCase)
             && left.TextPrefix == right.TextPrefix
-            && left.PartMarker == right.PartMarker
             && left.Files.SequenceEqual(right.Files, StringComparer.OrdinalIgnoreCase);
     }
 
@@ -477,7 +460,6 @@ public partial class Form1 : Form
         clearFilesButton.Enabled = !busy;
         browseDestinationButton.Enabled = !busy;
         prefixInput.Enabled = !busy;
-        partMarkerInput.Enabled = !busy;
         destinationInput.Enabled = !busy;
         filesList.Enabled = !busy;
         statusLabel.Text = message;
@@ -578,8 +560,7 @@ internal sealed class PreviewDialog : Form
 internal sealed record NumberingSettings(
     IReadOnlyList<string> Files,
     string DestinationFolder,
-    string TextPrefix,
-    string PartMarker);
+    string TextPrefix);
 
 internal sealed record NumberingPlan(NumberingSettings Settings, IReadOnlyList<DocumentNumberingPlan> Documents)
 {
@@ -589,8 +570,6 @@ internal sealed record NumberingPlan(NumberingSettings Settings, IReadOnlyList<D
 internal sealed record DocumentNumberingPlan(
     string SourcePath,
     string OutputPath,
-    string DisplayGroup,
-    int? PartNumber,
     int StartNumber,
     int PageCount,
     long OriginalBytes,
@@ -614,29 +593,27 @@ internal static class NumberingPlanner
     {
         Directory.CreateDirectory(settings.DestinationFolder);
 
-        var entries = settings.Files
-            .Select((path, index) => BuildEntry(path, index, settings.PartMarker))
+        var orderedPaths = settings.Files
+            .OrderBy(Path.GetFileName, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(path => path, StringComparer.CurrentCultureIgnoreCase)
             .ToArray();
-
-        var orderedEntries = OrderEntries(entries);
-        var nextBySeries = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var documents = new List<DocumentNumberingPlan>();
+        var nextNumber = 1;
 
-        foreach (var entry in orderedEntries)
+        foreach (var sourcePath in orderedPaths)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            using var document = PdfReader.Open(entry.Path, PdfDocumentOpenMode.Import);
+            using var document = PdfReader.Open(sourcePath, PdfDocumentOpenMode.Import);
             var pageCount = document.PageCount;
-            var seriesKey = entry.SeriesKey ?? entry.Path;
-            var startNumber = nextBySeries.TryGetValue(seriesKey, out var nextNumber) ? nextNumber : 1;
-            nextBySeries[seriesKey] = startNumber + pageCount;
+            var startNumber = nextNumber;
+            nextNumber += pageCount;
 
-            var outputPath = BuildOutputPath(entry.Path, settings.DestinationFolder);
+            var outputPath = BuildOutputPath(sourcePath, settings.DestinationFolder);
             var warnings = new List<string>();
-            if (Path.GetFullPath(entry.Path).Equals(Path.GetFullPath(outputPath), StringComparison.OrdinalIgnoreCase))
+            if (Path.GetFullPath(sourcePath).Equals(Path.GetFullPath(outputPath), StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException($"La ruta destino no puede ser la misma que el origen para:\n{entry.Path}");
+                throw new InvalidOperationException($"La ruta destino no puede ser la misma que el origen para:\n{sourcePath}");
             }
 
             if (File.Exists(outputPath))
@@ -645,46 +622,15 @@ internal static class NumberingPlanner
             }
 
             documents.Add(new DocumentNumberingPlan(
-                entry.Path,
+                sourcePath,
                 outputPath,
-                entry.SeriesKey ?? Path.GetFileNameWithoutExtension(entry.Path),
-                entry.PartNumber,
                 startNumber,
                 pageCount,
-                new FileInfo(entry.Path).Length,
+                new FileInfo(sourcePath).Length,
                 warnings));
         }
 
         return new NumberingPlan(settings, documents);
-    }
-
-    private static SourceEntry BuildEntry(string path, int originalIndex, string partMarker)
-    {
-        var name = Path.GetFileNameWithoutExtension(path);
-        var match = Regex.Match(name, $"{Regex.Escape(partMarker)}(?<number>\\d+)$", RegexOptions.IgnoreCase);
-        if (!match.Success || !int.TryParse(match.Groups["number"].Value, out var partNumber))
-        {
-            return new SourceEntry(path, originalIndex, null, null);
-        }
-
-        var seriesKey = name[..match.Index];
-        return new SourceEntry(path, originalIndex, seriesKey, partNumber);
-    }
-
-    private static IReadOnlyList<SourceEntry> OrderEntries(IReadOnlyList<SourceEntry> entries)
-    {
-        var firstIndexBySeries = entries
-            .Where(entry => entry.SeriesKey is not null)
-            .GroupBy(entry => entry.SeriesKey!, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Min(entry => entry.OriginalIndex), StringComparer.OrdinalIgnoreCase);
-
-        return entries
-            .OrderBy(entry => entry.SeriesKey is null ? entry.OriginalIndex : firstIndexBySeries[entry.SeriesKey])
-            .ThenBy(entry => entry.SeriesKey is null ? 0 : 1)
-            .ThenBy(entry => entry.SeriesKey, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(entry => entry.PartNumber ?? entry.OriginalIndex)
-            .ThenBy(entry => entry.OriginalIndex)
-            .ToArray();
     }
 
     private static string BuildOutputPath(string sourcePath, string destinationFolder)
@@ -692,7 +638,6 @@ internal static class NumberingPlanner
         return Path.Combine(destinationFolder, Path.GetFileName(sourcePath));
     }
 
-    private sealed record SourceEntry(string Path, int OriginalIndex, string? SeriesKey, int? PartNumber);
 }
 
 internal static class PdfNumberer
@@ -745,12 +690,12 @@ internal static class PdfNumberer
     private static void StampPageNumber(PdfPage page, string text)
     {
         using var graphics = XGraphics.FromPdfPage(page, XGraphicsPdfPageOptions.Append);
-        var font = new XFont("Arial", 7.5, XFontStyleEx.Regular);
+        var font = new XFont("Arial", 10, XFontStyleEx.Regular);
 
         var textSize = graphics.MeasureString(text, font);
-        const double margin = 7;
-        const double paddingX = 3.5;
-        const double paddingY = 2;
+        const double margin = 8;
+        const double paddingX = 4.5;
+        const double paddingY = 2.6;
         var boxWidth = textSize.Width + paddingX * 2;
         var boxHeight = textSize.Height + paddingY * 2;
         var x = Math.Max(margin, page.Width.Point - boxWidth - margin);
@@ -793,26 +738,19 @@ internal static class NumberingPlanFormatter
         {
             $"Destino: {plan.Settings.DestinationFolder}",
             $"Texto antes del número: {FormatEmpty(plan.Settings.TextPrefix)}",
-            $"Nomenclatura serie: {plan.Settings.PartMarker}",
+            "Orden: nombre de fichero ascendente",
             string.Empty,
         };
 
-        foreach (var group in plan.Documents.GroupBy(document => document.DisplayGroup))
+        foreach (var document in plan.Documents)
         {
-            var isSeries = group.Any(document => document.PartNumber is not null);
-            lines.Add(isSeries ? $"Serie: {group.Key}" : $"Documento: {group.Key}");
+            lines.Add($"{Path.GetFileName(document.SourcePath)}:");
+            lines.Add($"  Páginas: {document.PageCount}. Numeración: {document.StartNumber}-{document.EndNumber}");
+            lines.Add($"  Salida: {Path.GetFileName(document.OutputPath)}");
 
-            foreach (var document in group)
+            foreach (var warning in document.Warnings)
             {
-                var part = document.PartNumber is null ? string.Empty : $" part{document.PartNumber}:";
-                lines.Add($"  - {Path.GetFileName(document.SourcePath)}{part}");
-                lines.Add($"    Páginas: {document.PageCount}. Numeración: {document.StartNumber}-{document.EndNumber}");
-                lines.Add($"    Salida: {Path.GetFileName(document.OutputPath)}");
-
-                foreach (var warning in document.Warnings)
-                {
-                    lines.Add($"    Aviso: {warning}");
-                }
+                lines.Add($"  Aviso: {warning}");
             }
 
             lines.Add(string.Empty);

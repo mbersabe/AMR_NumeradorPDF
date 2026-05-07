@@ -20,8 +20,7 @@ dotnet publish NumeradorPdfApp\NumeradorPdfApp.csproj -c Release -r win-x64 --se
 
 1. Añade PDFs con `Añadir PDFs`, añade una carpeta con `Añadir carpeta`, o arrastra PDFs/carpetas a la ventana.
 2. Indica el texto opcional antes del número. En blanco genera `1`, `2`, `3`; con `Página` genera `Página 1`, `Página 2`, `Página 3`.
-3. Indica la nomenclatura de serie. Por defecto `_part`, así `Documento_part1.pdf` y `Documento_part2.pdf` continúan la misma numeración.
-4. Indica la ruta destino.
-5. Pulsa `Numerar PDFs` para generar copias en destino conservando el mismo nombre de fichero.
+3. Indica la ruta destino.
+4. Pulsa `Numerar PDFs` para generar copias en destino conservando el mismo nombre de fichero.
 
-Los PDFs que no acaban con la nomenclatura seguida de número se numeran de forma independiente empezando en 1.
+Los PDFs se ordenan por nombre ascendente y se numeran de forma correlativa en todo el lote, sin reiniciar el contador entre documentos.
