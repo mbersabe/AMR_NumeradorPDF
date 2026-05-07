@@ -2,4 +2,5 @@ bin/
 obj/
 publish/
 .build-out/
+.tmp/
 *.user

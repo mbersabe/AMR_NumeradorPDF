@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Text;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
@@ -297,7 +296,7 @@ public partial class Form1 : Form
     private static IEnumerable<string> EnumeratePdfFiles(string folder)
     {
         return Directory.EnumerateFiles(folder, "*.pdf", SearchOption.AllDirectories)
-            .OrderBy(path => path, StringComparer.CurrentCultureIgnoreCase);
+            .OrderBy(path => path, NaturalStringComparer.Instance);
     }
 
     private void RemoveSelectedFiles()
@@ -405,13 +404,24 @@ public partial class Form1 : Form
             return false;
         }
 
+        string destinationFullPath;
         try
         {
-            _ = Path.GetFullPath(destination);
+            destinationFullPath = Path.GetFullPath(destination);
         }
         catch (Exception ex)
         {
             ShowValidation($"La ruta destino no es válida:\n{ex.Message}");
+            return false;
+        }
+
+        files = files
+            .Where(file => !IsInFolder(file, destinationFullPath))
+            .ToArray();
+
+        if (files.Length == 0)
+        {
+            ShowValidation("Todos los PDFs seleccionados están dentro de la ruta destino. Selecciona la carpeta origen, no la carpeta ya numerada.");
             return false;
         }
 
@@ -429,6 +439,16 @@ public partial class Form1 : Form
     private void ShowValidation(string message)
     {
         MessageBox.Show(this, message, "Validación", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
+    private static bool IsInFolder(string filePath, string folderPath)
+    {
+        var fileFullPath = Path.GetFullPath(filePath);
+        var folderFullPath = Path.GetFullPath(folderPath)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+
+        return fileFullPath.StartsWith(folderFullPath, StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task RunBusyAsync(string message, Func<CancellationToken, Task> work)
@@ -594,8 +614,8 @@ internal static class NumberingPlanner
         Directory.CreateDirectory(settings.DestinationFolder);
 
         var orderedPaths = settings.Files
-            .OrderBy(Path.GetFileName, StringComparer.CurrentCultureIgnoreCase)
-            .ThenBy(path => path, StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(path => Path.GetFileName(path), NaturalStringComparer.Instance)
+            .ThenBy(path => path, NaturalStringComparer.Instance)
             .ToArray();
         var documents = new List<DocumentNumberingPlan>();
         var nextNumber = 1;
@@ -637,7 +657,111 @@ internal static class NumberingPlanner
     {
         return Path.Combine(destinationFolder, Path.GetFileName(sourcePath));
     }
+}
 
+internal sealed class NaturalStringComparer : IComparer<string>
+{
+    public static readonly NaturalStringComparer Instance = new();
+
+    private NaturalStringComparer()
+    {
+    }
+
+    public int Compare(string? x, string? y)
+    {
+        if (ReferenceEquals(x, y))
+        {
+            return 0;
+        }
+
+        if (x is null)
+        {
+            return -1;
+        }
+
+        if (y is null)
+        {
+            return 1;
+        }
+
+        var xIndex = 0;
+        var yIndex = 0;
+
+        while (xIndex < x.Length && yIndex < y.Length)
+        {
+            var xChar = x[xIndex];
+            var yChar = y[yIndex];
+
+            if (char.IsDigit(xChar) && char.IsDigit(yChar))
+            {
+                var numberCompare = CompareNumberToken(x, ref xIndex, y, ref yIndex);
+                if (numberCompare != 0)
+                {
+                    return numberCompare;
+                }
+
+                continue;
+            }
+
+            var charCompare = char.ToUpperInvariant(xChar).CompareTo(char.ToUpperInvariant(yChar));
+            if (charCompare != 0)
+            {
+                return charCompare;
+            }
+
+            xIndex++;
+            yIndex++;
+        }
+
+        return (x.Length - xIndex).CompareTo(y.Length - yIndex);
+    }
+
+    private static int CompareNumberToken(string x, ref int xIndex, string y, ref int yIndex)
+    {
+        var xStart = xIndex;
+        var yStart = yIndex;
+
+        while (xIndex < x.Length && char.IsDigit(x[xIndex]))
+        {
+            xIndex++;
+        }
+
+        while (yIndex < y.Length && char.IsDigit(y[yIndex]))
+        {
+            yIndex++;
+        }
+
+        var xTrimmed = TrimLeadingZeros(x, xStart, xIndex);
+        var yTrimmed = TrimLeadingZeros(y, yStart, yIndex);
+        var xLength = xIndex - xTrimmed;
+        var yLength = yIndex - yTrimmed;
+
+        if (xLength != yLength)
+        {
+            return xLength.CompareTo(yLength);
+        }
+
+        for (var index = 0; index < xLength; index++)
+        {
+            var digitCompare = x[xTrimmed + index].CompareTo(y[yTrimmed + index]);
+            if (digitCompare != 0)
+            {
+                return digitCompare;
+            }
+        }
+
+        return (xIndex - xStart).CompareTo(yIndex - yStart);
+    }
+
+    private static int TrimLeadingZeros(string value, int start, int end)
+    {
+        while (start < end - 1 && value[start] == '0')
+        {
+            start++;
+        }
+
+        return start;
+    }
 }
 
 internal static class PdfNumberer
@@ -698,13 +822,29 @@ internal static class PdfNumberer
         const double paddingY = 2.6;
         var boxWidth = textSize.Width + paddingX * 2;
         var boxHeight = textSize.Height + paddingY * 2;
-        var x = Math.Max(margin, page.Width.Point - boxWidth - margin);
-        var y = Math.Max(margin, page.Height.Point - boxHeight - margin);
+        var visibleBounds = GetVisibleBounds(page);
+        var x = Math.Max(visibleBounds.Left + margin, visibleBounds.Right - boxWidth - margin);
+        var y = Math.Max(visibleBounds.Top + margin, visibleBounds.Bottom - boxHeight - margin);
         var rectangle = new XRect(x, y, boxWidth, boxHeight);
 
         graphics.DrawRectangle(XBrushes.White, rectangle);
         graphics.DrawRectangle(new XPen(XColors.Black, 0.35), rectangle);
         graphics.DrawString(text, font, XBrushes.Black, rectangle, XStringFormats.Center);
+    }
+
+    private static XRect GetVisibleBounds(PdfPage page)
+    {
+        var cropBox = page.CropBox;
+        if (cropBox.Width <= 0 || cropBox.Height <= 0)
+        {
+            return new XRect(0, 0, page.Width.Point, page.Height.Point);
+        }
+
+        var left = cropBox.X1;
+        var right = cropBox.X2;
+        var top = page.Height.Point - cropBox.Y2;
+        var bottom = page.Height.Point - cropBox.Y1;
+        return new XRect(left, top, Math.Max(1, right - left), Math.Max(1, bottom - top));
     }
 
     private static string FormatPageText(string prefix, int number)
