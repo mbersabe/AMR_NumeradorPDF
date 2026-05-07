@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 using PdfSharp.Pdf.IO;
@@ -786,21 +787,13 @@ internal static class PdfNumberer
                 File.Delete(tempPath);
             }
 
-            File.Copy(documentPlan.SourcePath, tempPath, overwrite: true);
-            using (var document = PdfReader.Open(tempPath, PdfDocumentOpenMode.Modify))
+            if (HasDigitalSignature(documentPlan.SourcePath))
             {
-                for (var pageIndex = 0; pageIndex < document.Pages.Count; pageIndex++)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    var value = documentPlan.StartNumber + pageIndex;
-                    StampPageNumber(document.Pages[pageIndex], FormatPageText(plan.Settings.TextPrefix, value));
-
-                    completedPages++;
-                    progress.Report(BuildProgress(completedPages, totalPages, stopwatch, $"Numerando {Path.GetFileName(documentPlan.SourcePath)}"));
-                }
-
-                document.Save(tempPath);
+                WriteImportedCopy(documentPlan, plan.Settings.TextPrefix, tempPath, progress, cancellationToken, stopwatch, totalPages, ref completedPages);
+            }
+            else
+            {
+                WriteModifiedCopy(documentPlan, plan.Settings.TextPrefix, tempPath, progress, cancellationToken, stopwatch, totalPages, ref completedPages);
             }
 
             File.Move(tempPath, documentPlan.OutputPath, overwrite: true);
@@ -809,6 +802,76 @@ internal static class PdfNumberer
 
         progress.Report(new NumberingProgress(100, "Proceso terminado.", TimeSpan.Zero));
         return new NumberingResult(results);
+    }
+
+    private static void WriteModifiedCopy(
+        DocumentNumberingPlan documentPlan,
+        string textPrefix,
+        string tempPath,
+        IProgress<NumberingProgress> progress,
+        CancellationToken cancellationToken,
+        Stopwatch stopwatch,
+        int totalPages,
+        ref int completedPages)
+    {
+        File.Copy(documentPlan.SourcePath, tempPath, overwrite: true);
+        using var document = PdfReader.Open(tempPath, PdfDocumentOpenMode.Modify);
+
+        for (var pageIndex = 0; pageIndex < document.Pages.Count; pageIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StampAndReport(document.Pages[pageIndex], documentPlan, textPrefix, pageIndex, progress, stopwatch, totalPages, ref completedPages);
+        }
+
+        document.Save(tempPath);
+    }
+
+    private static void WriteImportedCopy(
+        DocumentNumberingPlan documentPlan,
+        string textPrefix,
+        string tempPath,
+        IProgress<NumberingProgress> progress,
+        CancellationToken cancellationToken,
+        Stopwatch stopwatch,
+        int totalPages,
+        ref int completedPages)
+    {
+        using var inputDocument = PdfReader.Open(documentPlan.SourcePath, PdfDocumentOpenMode.Import);
+        using var outputDocument = new PdfDocument();
+        outputDocument.Version = inputDocument.Version;
+
+        for (var pageIndex = 0; pageIndex < inputDocument.PageCount; pageIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var page = outputDocument.AddPage(inputDocument.Pages[pageIndex]);
+            StampAndReport(page, documentPlan, textPrefix, pageIndex, progress, stopwatch, totalPages, ref completedPages);
+        }
+
+        outputDocument.Save(tempPath);
+    }
+
+    private static void StampAndReport(
+        PdfPage page,
+        DocumentNumberingPlan documentPlan,
+        string textPrefix,
+        int pageIndex,
+        IProgress<NumberingProgress> progress,
+        Stopwatch stopwatch,
+        int totalPages,
+        ref int completedPages)
+    {
+        var value = documentPlan.StartNumber + pageIndex;
+        StampPageNumber(page, FormatPageText(textPrefix, value));
+
+        completedPages++;
+        progress.Report(BuildProgress(completedPages, totalPages, stopwatch, $"Numerando {Path.GetFileName(documentPlan.SourcePath)}"));
+    }
+
+    private static bool HasDigitalSignature(string path)
+    {
+        var text = Encoding.GetEncoding(28591).GetString(File.ReadAllBytes(path));
+        return text.Contains("/ByteRange", StringComparison.Ordinal)
+            && text.Contains("/Sig", StringComparison.Ordinal);
     }
 
     private static void StampPageNumber(PdfPage page, string text)
@@ -834,9 +897,15 @@ internal static class PdfNumberer
 
     private static XRect GetVisibleBounds(PdfPage page)
     {
+        if (!page.Elements.ContainsKey("/CropBox"))
+        {
+            return new XRect(0, 0, page.Width.Point, page.Height.Point);
+        }
+
         var cropBox = page.CropBox;
         if (cropBox.Width <= 0 || cropBox.Height <= 0)
         {
+            page.Elements.Remove("/CropBox");
             return new XRect(0, 0, page.Width.Point, page.Height.Point);
         }
 
